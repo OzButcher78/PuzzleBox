@@ -5,17 +5,17 @@
 
 #include <stdio.h>
 #include <string.h>
-#include <popt.h>
-#include <err.h>
 #include <stdlib.h>
 #include <ctype.h>
 #include <math.h>
-#include <unistd.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <fcntl.h>
 #include <time.h>
-#include "apple-strdupa.h"
+#include <stdarg.h>
+#include <stdbool.h>
+
+#ifdef _WIN32
+#define _USE_MATH_DEFINES
+#include <windows.h>
+#endif
 
 // Flags for maze array
 #define	FLAGL 0x01              // Left
@@ -33,6 +33,189 @@
 #define	SCALE 1000LL            // Scales used for some aspects of output
 #define	SCALEI "0.001"
 #define	scaled(x)	((long long)round((x)*SCALE))
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
+typedef enum
+{
+   OPT_NONE,
+   OPT_INT,
+   OPT_DOUBLE,
+   OPT_STRING
+} option_type_t;
+
+typedef struct
+{
+   const char *long_name;
+   char short_name;
+   option_type_t type;
+   void *target;
+   const char *descrip;
+   const char *arg_desc;
+} option_t;
+
+static struct tm *
+gmtime_utc (const time_t *now, struct tm *result)
+{
+#ifdef _WIN32
+   if (gmtime_s (result, now))
+      return NULL;
+   return result;
+#else
+   return gmtime_r (now, result);
+#endif
+}
+
+static void
+set_error (char *buffer, size_t len, const char *fmt, ...)
+{
+   va_list args;
+   va_start (args, fmt);
+   vsnprintf (buffer, len, fmt, args);
+   va_end (args);
+}
+
+static unsigned int rng_state;
+static int rng_seeded = 0;
+
+static void
+seed_rng (void)
+{
+   if (!rng_seeded)
+   {
+      rng_state = (unsigned int) time (NULL);
+      rng_state ^= (unsigned int) clock ();
+      rng_seeded = 1;
+   }
+}
+
+static int
+random_int (int limit)
+{
+   if (limit <= 0)
+      return 0;
+   seed_rng ();
+   rng_state = rng_state * 1103515245 + 12345;
+   return (int) ((rng_state / 65536) % 32768) % limit;
+}
+
+static int
+parse_int (const char *value, int *out)
+{
+   char *end = NULL;
+   long v = strtol (value, &end, 10);
+   if (!value[0] || (end && *end))
+      return -1;
+   *out = (int) v;
+   return 0;
+}
+
+static int
+parse_double (const char *value, double *out)
+{
+   char *end = NULL;
+   double v = strtod (value, &end);
+   if (!value[0] || (end && *end))
+      return -1;
+   *out = v;
+   return 0;
+}
+
+static void
+print_usage (const char *progname, const option_t *options)
+{
+   printf ("Usage: %s [options]\n", progname);
+   printf ("Generates OpenSCAD code for the cylindrical puzzle box.\n\n");
+   printf ("Options:\n");
+   for (int i = 0; options[i].long_name; i++)
+   {
+      const option_t *o = &options[i];
+      printf ("  -%c, --%s", o->short_name, o->long_name);
+      if (o->type != OPT_NONE)
+         printf (" %s", o->arg_desc ? o->arg_desc : "VALUE");
+      printf ("\n      %s\n", o->descrip ? o->descrip : "");
+   }
+   printf ("  -h, --help\n      Show this help message.\n\n");
+   printf ("Examples:\n");
+   printf ("  %s > box.scad\n", progname);
+   printf ("  %s --core-height 80 --maze-complexity 7 > tall_box.scad\n", progname);
+   printf ("  %s --core-diameter 14 --outer-sides 0 --maze-step 2.5 > round_box.scad\n", progname);
+}
+
+static const option_t *
+find_option_by_short (const option_t *options, char short_name)
+{
+   for (int i = 0; options[i].long_name; i++)
+      if (options[i].short_name == short_name)
+         return &options[i];
+   return NULL;
+}
+
+static const option_t *
+find_option_by_long (const option_t *options, const char *long_name)
+{
+   for (int i = 0; options[i].long_name; i++)
+      if (strcmp (options[i].long_name, long_name) == 0)
+         return &options[i];
+   return NULL;
+}
+
+static int
+apply_option (const option_t *opt, const char *value, char *error)
+{
+   switch (opt->type)
+   {
+   case OPT_NONE:
+      *(int *) opt->target = 1;
+      return 0;
+   case OPT_INT:
+      if (!value || parse_int (value, (int *) opt->target))
+      {
+         set_error (error, 256, "Invalid integer for -%c", opt->short_name);
+         return -1;
+      }
+      return 0;
+   case OPT_DOUBLE:
+      if (!value || parse_double (value, (double *) opt->target))
+      {
+         set_error (error, 256, "Invalid number for -%c", opt->short_name);
+         return -1;
+      }
+      return 0;
+   case OPT_STRING:
+      if (!value)
+      {
+         set_error (error, 256, "Missing value for -%c", opt->short_name);
+         return -1;
+      }
+      {
+         char **target = (char **) opt->target;
+         free (*target);
+         *target = strdup (value);
+         if (!*target)
+         {
+            set_error (error, 256, "Out of memory");
+            return -1;
+         }
+      }
+      return 0;
+   }
+   set_error (error, 256, "Unknown option type");
+   return -1;
+}
+
+static void
+fatal (const char *fmt, ...)
+{
+   va_list args;
+   va_start (args, fmt);
+   vfprintf (stderr, fmt, args);
+   va_end (args);
+   fputc ('\n', stderr);
+   exit (1);
+}
 
 int
 main (int argc, const char *argv[])
@@ -82,10 +265,6 @@ main (int argc, const char *argv[])
    int noa = 0;
    int basewide = 0;
 
-   int f = open ("/dev/urandom", O_RDONLY);
-   if (f < 0)
-      err (1, "Open /dev/random");
-
    char pathsep = 0;
    char *path = getenv ("PATH_INFO");
    if (path)
@@ -93,216 +272,260 @@ main (int argc, const char *argv[])
    else if ((path = getenv ("QUERY_STRING")))
       pathsep = '&';
 
-   const struct poptOption optionsTable[] = {
-      {"parts", 'm', POPT_ARG_INT | POPT_ARGFLAG_SHOW_DEFAULT, &parts, 0, "Total parts", "N"},
-      {"part", 'n', POPT_ARG_INT, &part, 0, "Part to make", "N (0 for all)"},
-      {"inside", 'i', POPT_ARG_NONE, &inside, 0, "Maze on inside (hard)"},
-      {"flip", 'f', POPT_ARG_NONE, &flip, 0, "Alternating inside/outside maze"},
-      {"nubs", 'N', POPT_ARG_INT | POPT_ARGFLAG_SHOW_DEFAULT, &nubs, 0, "Nubs", "N"},
-      {"helix", 'H', POPT_ARG_INT | POPT_ARGFLAG_SHOW_DEFAULT, &helix, 0, "Helix", "N (0 for non helical)"},
-      {"base-height", 'b', POPT_ARG_DOUBLE | POPT_ARGFLAG_SHOW_DEFAULT, &baseheight, 0, "Base height", "mm"},
-      {"core-diameter", 'c', POPT_ARG_DOUBLE | POPT_ARGFLAG_SHOW_DEFAULT, &corediameter, 0, "Core diameter for content", "mm"},
-      {"core-height", 'h', POPT_ARG_DOUBLE | POPT_ARGFLAG_SHOW_DEFAULT, &coreheight, 0, "Core height for content", "mm"},
-      {"core-gap", 'C', POPT_ARG_DOUBLE | POPT_ARGFLAG_SHOW_DEFAULT, &coregap, 0, "Core gap to allow content to be removed", "mm"},
-      {"core-solid", 'q', POPT_ARG_NONE, &coresolid, 0, "Core solid (content is in part 2)"},
-      {"base-thickness", 'B', POPT_ARG_DOUBLE | POPT_ARGFLAG_SHOW_DEFAULT, &basethickness, 0, "Base thickness", "mm"},
-      {"base-gap", 'G', POPT_ARG_DOUBLE | POPT_ARGFLAG_SHOW_DEFAULT, &basegap, 0, "Base gap (Z clearance)", "mm"},
-      {"base-wide", 'W', POPT_ARG_NONE, &basewide, 0, "Inside base full width"},
-      {"part-thickness", 'w', POPT_ARG_DOUBLE | POPT_ARGFLAG_SHOW_DEFAULT, &wallthickness, 0, "Wall thickness", "mm"},
-      {"maze-thickness", 't', POPT_ARG_DOUBLE | POPT_ARGFLAG_SHOW_DEFAULT, &mazethickness, 0, "Maze thickness", "mm"},
-      {"maze-step", 'z', POPT_ARG_DOUBLE | POPT_ARGFLAG_SHOW_DEFAULT, &mazestep, 0, "Maze spacing", "mm"},
-      {"maze-margin", 'M', POPT_ARG_DOUBLE | (mazemargin ? POPT_ARGFLAG_SHOW_DEFAULT : 0), &mazemargin, 0, "Maze top margin", "mm"},
-      {"maze-complexity", 'X', POPT_ARG_INT | (mazecomplexity ? POPT_ARGFLAG_SHOW_DEFAULT : 0), &mazecomplexity, 0,
-       "Maze complexity", "-10 to 10"},
-      {"park-thickness", 'p', POPT_ARG_DOUBLE | (parkthickness ? POPT_ARGFLAG_SHOW_DEFAULT : 0), &parkthickness, 0,
-       "Thickness of park ridge to click closed", "mm"},
-      {"park-vertical", 'v', POPT_ARG_NONE, &parkvertical, 0, "Park vertically"},
-      {"clearance", 'g', POPT_ARG_DOUBLE | POPT_ARGFLAG_SHOW_DEFAULT, &clearance, 0, "General X/Y clearance", "mm"},
-      {"outer-sides", 's', POPT_ARG_INT | (outersides ? POPT_ARGFLAG_SHOW_DEFAULT : 0), &outersides, 0, "Number of outer sides",
-       "N (0=round)"},
-      {"outer-round", 'r', POPT_ARG_DOUBLE | POPT_ARGFLAG_SHOW_DEFAULT, &outerround, 0, "Outer rounding on ends", "mm"},
-      {"grip-depth", 'R', POPT_ARG_DOUBLE | POPT_ARGFLAG_SHOW_DEFAULT, &gripdepth, 0, "Grip depth", "mm"},
-      {"text-depth", 'D', POPT_ARG_DOUBLE | POPT_ARGFLAG_SHOW_DEFAULT, &textdepth, 0, "Text depth", "mm"},
-      {"text-end", 'E', POPT_ARG_STRING | (textend ? POPT_ARGFLAG_SHOW_DEFAULT : 0), &textend, 0, "Text (initials) on end",
-       "X{\\X...}"},
-      {"text-side", 'S', POPT_ARG_STRING | (textsides ? POPT_ARGFLAG_SHOW_DEFAULT : 0), &textsides, 0, "Text on sides",
-       "Text{\\Text...}"},
-      {"text-font", 'F', POPT_ARG_STRING | (textfont ? POPT_ARGFLAG_SHOW_DEFAULT : 0), &textfont, 0, "Text font (optional)",
-       "Font"},
-      {"text-font-end", 'e', POPT_ARG_STRING | (textfontend ? POPT_ARGFLAG_SHOW_DEFAULT : 0), &textfontend, 0,
-       "Text font for end (optional)", "Font"},
-      {"text-slow", 'd', POPT_ARG_NONE, &textslow, 0, "Text has diagonal edges (very slow)"},
-      {"text-side-scale", 'T', POPT_ARG_DOUBLE, &textsidescale, 0, "Scale side text (i.e. if too long)", "N"},
-      {"text-outset", 'O', POPT_ARG_NONE, &textoutset, 0, "Text on sides is outset not embossed"},
-      {"text-inside", 'I', POPT_ARG_STRING | (textinside ? POPT_ARGFLAG_SHOW_DEFAULT : 0), &textinside, 0,
-       "Text (initials) inside end", "X{\\X...}"},
-      {"logo-depth", 'L', POPT_ARG_DOUBLE | POPT_ARGFLAG_SHOW_DEFAULT, &logodepth, 0, "Logo (and inside text) cut depth", "mm"},
-      {"symmetric-cut", 'V', POPT_ARG_NONE, &symmectriccut, 0, "Symmetric maze cut"},
-      {"nub-r-clearance", 'y', POPT_ARG_DOUBLE | POPT_ARGFLAG_SHOW_DEFAULT, &nubrclearance, 0, "Extra clearance on radius for nub",
-       "mm"},
-      {"nub-z-clearance", 'Z', POPT_ARG_DOUBLE | POPT_ARGFLAG_SHOW_DEFAULT, &nubzclearance, 0, "Extra clearance on height of nub",
-       "mm"},
-      {"logo", 'A', POPT_ARG_NONE, &logo, 0, "Include A&A logo in last lid"},
-      {"test", 'Q', POPT_ARG_NONE, &testmaze, 0, "Test pattern instead of maze"},
-      {"mime", 0, POPT_ARG_NONE | (mime ? POPT_ARGFLAG_DOC_HIDDEN : 0), &mime, 0, "MIME Header"},
-      {"no-a", 0, POPT_ARG_NONE | (noa ? POPT_ARGFLAG_DOC_HIDDEN : 0), &noa, 0, "No A"},
-      {"web-form", 0, POPT_ARG_NONE, &webform, 0, "Web form"},
-      POPT_AUTOHELP {}
+   option_t optionsTable[] = {
+      {"parts", 'm', OPT_INT, &parts, "Total parts", "N"},
+      {"part", 'n', OPT_INT, &part, "Part to make", "N (0 for all)"},
+      {"inside", 'i', OPT_NONE, &inside, "Maze on inside (hard)", NULL},
+      {"flip", 'f', OPT_NONE, &flip, "Alternating inside/outside maze", NULL},
+      {"nubs", 'N', OPT_INT, &nubs, "Nubs", "N"},
+      {"helix", 'H', OPT_INT, &helix, "Helix", "N (0 for non helical)"},
+      {"base-height", 'b', OPT_DOUBLE, &baseheight, "Base height", "mm"},
+      {"core-diameter", 'c', OPT_DOUBLE, &corediameter, "Core diameter for content", "mm"},
+      {"core-height", 'h', OPT_DOUBLE, &coreheight, "Core height for content", "mm"},
+      {"core-gap", 'C', OPT_DOUBLE, &coregap, "Core gap to allow content to be removed", "mm"},
+      {"core-solid", 'q', OPT_NONE, &coresolid, "Core solid (content is in part 2)", NULL},
+      {"base-thickness", 'B', OPT_DOUBLE, &basethickness, "Base thickness", "mm"},
+      {"base-gap", 'G', OPT_DOUBLE, &basegap, "Base gap (Z clearance)", "mm"},
+      {"base-wide", 'W', OPT_NONE, &basewide, "Inside base full width", NULL},
+      {"part-thickness", 'w', OPT_DOUBLE, &wallthickness, "Wall thickness", "mm"},
+      {"maze-thickness", 't', OPT_DOUBLE, &mazethickness, "Maze thickness", "mm"},
+      {"maze-step", 'z', OPT_DOUBLE, &mazestep, "Maze spacing", "mm"},
+      {"maze-margin", 'M', OPT_DOUBLE, &mazemargin, "Maze top margin", "mm"},
+      {"maze-complexity", 'X', OPT_INT, &mazecomplexity, "Maze complexity", "-10 to 10"},
+      {"park-thickness", 'p', OPT_DOUBLE, &parkthickness, "Thickness of park ridge to click closed", "mm"},
+      {"park-vertical", 'v', OPT_NONE, &parkvertical, "Park vertically", NULL},
+      {"clearance", 'g', OPT_DOUBLE, &clearance, "General X/Y clearance", "mm"},
+      {"outer-sides", 's', OPT_INT, &outersides, "Number of outer sides", "N (0=round)"},
+      {"outer-round", 'r', OPT_DOUBLE, &outerround, "Outer rounding on ends", "mm"},
+      {"grip-depth", 'R', OPT_DOUBLE, &gripdepth, "Grip depth", "mm"},
+      {"text-depth", 'D', OPT_DOUBLE, &textdepth, "Text depth", "mm"},
+      {"text-end", 'E', OPT_STRING, &textend, "Text (initials) on end", "X{\\X...}"},
+      {"text-side", 'S', OPT_STRING, &textsides, "Text on sides", "Text{\\Text...}"},
+      {"text-font", 'F', OPT_STRING, &textfont, "Text font (optional)", "Font"},
+      {"text-font-end", 'e', OPT_STRING, &textfontend, "Text font for end (optional)", "Font"},
+      {"text-slow", 'd', OPT_NONE, &textslow, "Text has diagonal edges (very slow)", NULL},
+      {"text-side-scale", 'T', OPT_DOUBLE, &textsidescale, "Scale side text (i.e. if too long)", "N"},
+      {"text-outset", 'O', OPT_NONE, &textoutset, "Text on sides is outset not embossed", NULL},
+      {"text-inside", 'I', OPT_STRING, &textinside, "Text (initials) inside end", "X{\\X...}"},
+      {"logo-depth", 'L', OPT_DOUBLE, &logodepth, "Logo (and inside text) cut depth", "mm"},
+      {"symmetric-cut", 'V', OPT_NONE, &symmectriccut, "Symmetric maze cut", NULL},
+      {"nub-r-clearance", 'y', OPT_DOUBLE, &nubrclearance, "Extra clearance on radius for nub", "mm"},
+      {"nub-z-clearance", 'Z', OPT_DOUBLE, &nubzclearance, "Extra clearance on height of nub", "mm"},
+      {"logo", 'A', OPT_NONE, &logo, "Include A&A logo in last lid", NULL},
+      {"test", 'Q', OPT_NONE, &testmaze, "Test pattern instead of maze", NULL},
+      {"mime", 0, OPT_NONE, &mime, "MIME Header", NULL},
+      {"no-a", 0, OPT_NONE, &noa, "No A", NULL},
+      {"web-form", 0, OPT_NONE, &webform, "Web form", NULL},
+      {NULL, 0, OPT_NONE, NULL, NULL, NULL}
    };
 
-   {                            // POPT
-      poptContext optCon;       // context for parsing command-line options
+   char error[256] = {0};
 
-      optCon = poptGetContext (NULL, argc, argv, optionsTable, 0);
-      //poptSetOtherOptionHelp (optCon, "");
-
-      int c;
-      if ((c = poptGetNextOpt (optCon)) < -1)
-         errx (1, "%s: %s\n", poptBadOption (optCon, POPT_BADOPTION_NOALIAS), poptStrerror (c));
-
-      if (poptPeekArg (optCon))
+   for (int i = 1; i < argc; i++)
+   {
+      const char *arg = argv[i];
+      if (!strcmp (arg, "--help") || !strcmp (arg, "-h"))
       {
-         poptPrintUsage (optCon, stderr, 0);
-         return -1;
+         print_usage (argv[0], optionsTable);
+         return 0;
       }
-      poptFreeContext (optCon);
+
+      const option_t *opt = NULL;
+      const char *value = NULL;
+
+      if (strncmp (arg, "--", 2) == 0)
+      {
+         const char *name = arg + 2;
+         char namebuf[64];
+         const char *eq = strchr (name, '=');
+         if (eq)
+         {
+            size_t len = eq - name;
+            if (len >= sizeof (namebuf))
+               len = sizeof (namebuf) - 1;
+            memcpy (namebuf, name, len);
+            namebuf[len] = 0;
+            name = namebuf;
+            value = eq + 1;
+         }
+         opt = find_option_by_long (optionsTable, name);
+         if (!opt)
+         {
+            fprintf (stderr, "Unknown option: %s\n", arg);
+            return 1;
+         }
+         if (opt->type != OPT_NONE && !value)
+         {
+            if (i + 1 >= argc)
+            {
+               fprintf (stderr, "Missing value for %s\n", arg);
+               return 1;
+            }
+            value = argv[++i];
+         }
+         else if (opt->type == OPT_NONE && value)
+         {
+            fprintf (stderr, "Option %s does not take a value\n", arg);
+            return 1;
+         }
+      }
+      else if (arg[0] == '-' && arg[1])
+      {
+         char short_name = arg[1];
+         opt = find_option_by_short (optionsTable, short_name);
+         if (!opt)
+         {
+            fprintf (stderr, "Unknown option: %s\n", arg);
+            return 1;
+         }
+         if (opt->type != OPT_NONE)
+         {
+            if (arg[2])
+               value = arg + 2;
+            else
+            {
+               if (i + 1 >= argc)
+               {
+                  fprintf (stderr, "Missing value for -%c\n", short_name);
+                  return 1;
+               }
+               value = argv[++i];
+            }
+         }
+         else if (arg[2])
+         {
+            fprintf (stderr, "Option -%c does not take a value\n", short_name);
+            return 1;
+         }
+      }
+      else
+      {
+         fprintf (stderr, "Unknown argument: %s\n", arg);
+         return 1;
+      }
+
+      if (opt && apply_option (opt, value, error))
+      {
+         fprintf (stderr, "%s\n", error);
+         return 1;
+      }
    }
 
-   char *error = NULL;
    if (path)
-   {                            // Settings from PATH_INFO
-      path = strdupa (path);
-      while (*path)
+   {
+      char *pathcopy = strdup (path);
+      char *p = pathcopy;
+      while (p && *p && !*error)
       {
-         if (*path == pathsep)
+         if (*p == pathsep)
          {
-            *path++ = 0;
+            *p++ = 0;
             continue;
          }
-         if (!isalpha (*path))
+         if (!isalpha (*p))
          {
-            if (asprintf (&error, "Path error [%s]\n", path) < 0)
-               errx (1, "malloc");
+            set_error (error, sizeof (error), "Path error [%s]", p);
             break;
          }
-         char arg = *path++;
-         int o;
-         for (o = 0; optionsTable[o].longName && optionsTable[o].shortName != arg; o++);
-         if (!optionsTable[o].shortName)
+         char argch = *p++;
+         const option_t *opt = find_option_by_short (optionsTable, argch);
+         if (!opt)
          {
-            if (asprintf (&error, "Unknown arg [%c]", arg) < 0)
-               errx (1, "malloc");
+            set_error (error, sizeof (error), "Unknown arg [%c]", argch);
             break;
          }
-         if (optionsTable[o].arg)
-            switch (optionsTable[o].argInfo & POPT_ARG_MASK)
+         char *value = NULL;
+         if (opt->type != OPT_NONE)
+         {
+            if (*p != '=')
             {
-            case POPT_ARG_INT:
-               if (*path != '=')
-               {
-                  if (asprintf (&error, "Missing value [%c=]", arg) < 0)
-                     errx (1, "malloc");
-                  break;
-               }
-               if (path[1])
-                  *(int *) optionsTable[o].arg = strtod (path + 1, &path);
-               break;
-            case POPT_ARG_DOUBLE:
-               if (*path != '=')
-               {
-                  if (asprintf (&error, "Missing value [%c=]", arg) < 0)
-                     errx (1, "malloc");
-                  break;
-               }
-               if (path[1])
-                  *(double *) optionsTable[o].arg = strtod (path + 1, &path);
-               break;
-            case POPT_ARG_NONE:
-               *(int *) optionsTable[o].arg = 1;
-               if (*path == '=')
-               {                // Skip =on, etc.
-                  path++;
-                  while (*path && *path != pathsep)
-                     path++;
-               }
-               break;
-            case POPT_ARG_STRING:
-               if (*path != '=')
-               {
-                  if (asprintf (&error, "Missing value [%c=]", arg) < 0)
-                     errx (1, "malloc");
-                  break;
-               }
-               path++;
-               *(char **) optionsTable[o].arg = path;
-               char *o = path;
-               while (*path && *path != pathsep)
-               {
-                  if (pathsep == '&' && *path == '+')
-                     *o++ = ' ';
-                  else if (pathsep == '&' && *path == '%' && isxdigit (path[1]) && isxdigit (path[2]))
-                  {
-                     *o++ =
-                        (((isalpha (path[1]) ? 9 : 0) + (path[1] & 0xF)) << 4) + ((isalpha (path[2]) ? 9 : 0) + (path[2] & 0xF));
-                     path += 2;
-                  } else
-                     *o++ = *path;
-                  path++;
-               }
-               if (o < path)
-                  *o = 0;
+               set_error (error, sizeof (error), "Missing value [%c=]", argch);
                break;
             }
+            p++;
+            value = p;
+            char *q = p;
+            while (*p && *p != pathsep)
+            {
+               if (pathsep == '&' && *p == '+')
+                  *q++ = ' ';
+               else if (pathsep == '&' && *p == '%' && isxdigit (p[1]) && isxdigit (p[2]))
+               {
+                  int v1 = isalpha (p[1]) ? (10 + (p[1] & 0xF)) : (p[1] & 0xF);
+                  int v2 = isalpha (p[2]) ? (10 + (p[2] & 0xF)) : (p[2] & 0xF);
+                  *q++ = (char) ((v1 << 4) + v2);
+                  p += 2;
+               }
+               else
+                  *q++ = *p;
+               p++;
+            }
+            *q = 0;
+         }
+         else if (*p == '=')
+         {
+            while (*p && *p != pathsep)
+               p++;
+         }
+         if (apply_option (opt, value, error))
+            break;
+         while (*p && *p != pathsep)
+            p++;
+         if (*p == pathsep)
+            p++;
+      }
+      free (pathcopy);
+      if (*error)
+      {
+         fprintf (stderr, "%s\n", error);
+         return 1;
       }
    }
 
    if (webform)
    {
       int o;
-      for (o = 0; optionsTable[o].longName; o++)
-         if (optionsTable[o].shortName && optionsTable[o].arg)
+      for (o = 0; optionsTable[o].long_name; o++)
+         if (optionsTable[o].short_name && optionsTable[o].target)
          {
             printf ("<tr>");
-            printf ("<td><label for='%c'>%c%s</label></td>", optionsTable[o].shortName, optionsTable[o].shortName,
-                    (optionsTable[o].argInfo & POPT_ARG_MASK) == POPT_ARG_NONE ? "" : "=");
+            printf ("<td><label for='%c'>%c%s</label></td>", optionsTable[o].short_name, optionsTable[o].short_name,
+                    optionsTable[o].type == OPT_NONE ? "" : "=");
             printf ("<td>");
-            switch (optionsTable[o].argInfo & POPT_ARG_MASK)
+            switch (optionsTable[o].type)
             {
-            case POPT_ARG_NONE:        // Checkbox
-               printf ("<input type=checkbox id='%c' name='%c'/>", optionsTable[o].shortName, optionsTable[o].shortName);
+            case OPT_NONE:
+               printf ("<input type=checkbox id='%c' name='%c'/>", optionsTable[o].short_name, optionsTable[o].short_name);
                break;
-            case POPT_ARG_INT: // Select
+            case OPT_INT:
                {
-                  int l = 0,
-                     h = 3,
-                     v = *(int *) optionsTable[o].arg;
-                  if (optionsTable[o].shortName == 'N')
+                  int l = 0, h = 3, v = *(int *) optionsTable[o].target;
+                  if (optionsTable[o].short_name == 'N')
                      l = 1;     // Nubs
-                  if (optionsTable[o].shortName == 'm')
+                  if (optionsTable[o].short_name == 'm')
                      l = 2;     // Walls
-                  if (optionsTable[o].shortName == 'n' || optionsTable[o].shortName == 'm')
+                  if (optionsTable[o].short_name == 'n' || optionsTable[o].short_name == 'm')
                      h = 6;     // Walls or part
-                  if (optionsTable[o].shortName == 's')
+                  if (optionsTable[o].short_name == 's')
                      h = 20;    // Sides
-                  if (optionsTable[o].shortName == 'X')
+                  if (optionsTable[o].short_name == 'X')
                   {             // Complexity
                      l = -10;
                      h = 10;
                   }
-                  printf ("<select name='%c' id='%c'>", optionsTable[o].shortName, optionsTable[o].shortName);
+                  printf ("<select name='%c' id='%c'>", optionsTable[o].short_name, optionsTable[o].short_name);
                   for (; l <= h; l++)
                      printf ("<option value='%d'%s>%d</option>", l, l == v ? " selected" : "", l);
                   printf ("</select>");
                }
                break;
-            case POPT_ARG_DOUBLE:      // Double
+            case OPT_DOUBLE:
                {
-                  double v = *(double *) optionsTable[o].arg;
-                  printf ("<input size='5' name='%c' id='%c'", optionsTable[o].shortName, optionsTable[o].shortName);
+                  double v = *(double *) optionsTable[o].target;
+                  printf ("<input size='5' name='%c' id='%c'", optionsTable[o].short_name, optionsTable[o].short_name);
                   if (v)
                   {
-                     char temp[50],
-                      *p;
+                     char temp[50], *p;
                      sprintf (temp, "%f", v);
                      for (p = temp + strlen (temp); p > temp && p[-1] == '0'; p--);
                      if (p > temp && p[-1] == '.')
@@ -313,28 +536,28 @@ main (int argc, const char *argv[])
                   printf ("/>");
                }
                break;
-            case POPT_ARG_STRING:      // String
+            case OPT_STRING:
                {
-                  char *v = *(char **) optionsTable[o].arg;
-                  printf ("<input name='%c' id='%c'", optionsTable[o].shortName, optionsTable[o].shortName);
-                  if (optionsTable[o].shortName == 'E')
-                     printf (" size='2'");      // Initials
+                  char *v = *(char **) optionsTable[o].target;
+                  printf ("<input name='%c' id='%c'", optionsTable[o].short_name, optionsTable[o].short_name);
+                  if (optionsTable[o].short_name == 'E')
+                     printf (" size='2'");
                   if (v)
                      printf (" value='%s'", v);
                   printf ("/>");
                }
                break;
             }
-            if (optionsTable[o].argDescrip)
-               printf ("%s", optionsTable[o].argDescrip);
+            if (optionsTable[o].arg_desc)
+               printf ("%s", optionsTable[o].arg_desc);
             printf ("</td>");
-            printf ("<td><label for='%c'>%s</label></td>", optionsTable[o].shortName, optionsTable[o].descrip);
+            printf ("<td><label for='%c'>%s</label></td>", optionsTable[o].short_name, optionsTable[o].descrip);
             printf ("</tr>\n");
          }
       return 0;
    }
 
-   // Sanity checks and adjustments
+// Sanity checks and adjustments
    char *normalise (char *t)
    {                            // Simple text normalise
       if (!t || !*t)
@@ -343,7 +566,7 @@ main (int argc, const char *argv[])
       while (*t)
       {
          if (*t == '"')
-            *t == '\'';
+            *t = '\'';
          t++;
       }
       return text;
@@ -394,44 +617,47 @@ main (int argc, const char *argv[])
    {
       printf ("Content-Type: application/scad\r\nContent-Disposition: Attachment; filename=puzzlebox");
       int o;
-      for (o = 0; optionsTable[o].longName; o++)
-         if (optionsTable[o].shortName && optionsTable[o].arg)
-            switch (optionsTable[o].argInfo & POPT_ARG_MASK)
+      for (o = 0; optionsTable[o].long_name; o++)
+         if (optionsTable[o].short_name && optionsTable[o].target)
+            switch (optionsTable[o].type)
             {
-            case POPT_ARG_NONE:
-               if (!*(int *) optionsTable[o].arg)
+            case OPT_NONE:
+               if (!*(int *) optionsTable[o].target)
                   break;
-               printf ("-%c", optionsTable[o].shortName);
+               printf ("-%c", optionsTable[o].short_name);
                break;
-            case POPT_ARG_INT:
-               if (!*(int *) optionsTable[o].arg)
+            case OPT_INT:
+               if (!*(int *) optionsTable[o].target)
                   break;
-               printf ("-%d%c", *(int *) optionsTable[o].arg, optionsTable[o].shortName);
+               printf ("-%d%c", *(int *) optionsTable[o].target, optionsTable[o].short_name);
                break;
-            case POPT_ARG_DOUBLE:
-               if (!*(double *) optionsTable[o].arg)
-                  break;
-               char temp[50],
-                *p;
-               sprintf (temp, "%f", *(double *) optionsTable[o].arg);
-               p = temp + strlen (temp) - 1;
-               while (*p == '0')
-                  *p-- = 0;
-               p = strchr (temp, '.');
-               if (*p)
-                  *p++ = 0;
-               printf ("-%s%c%s", temp, optionsTable[o].shortName, p);
-               break;
-            case POPT_ARG_STRING:
-               if (!*(char **) optionsTable[o].arg)
+            case OPT_DOUBLE:
+               if (!*(double *) optionsTable[o].target)
                   break;
                {
-                  char *p = strdupa (*(char * *) optionsTable[o].arg),
-                     *q;
-                  for (q = p; *q; q++)
+                  char temp[50], *p;
+                  sprintf (temp, "%f", *(double *) optionsTable[o].target);
+                  p = temp + strlen (temp) - 1;
+                  while (p > temp && *p == '0')
+                     *p-- = 0;
+                  if (*p == '.')
+                     *p = 0;
+                  printf ("-%s%c", temp, optionsTable[o].short_name);
+               }
+               break;
+            case OPT_STRING:
+               if (!*(char **) optionsTable[o].target)
+                  break;
+               {
+                  char *p = strdup (*(char * *) optionsTable[o].target), *q;
+                  for (q = p; q && *q; q++)
                      if (*q <= ' ' || *q == '/' || *q == '\\' || *q == '"' || *q == '\'' || *q == ':' || *q == ';')
                         *q = '_';
-                  printf ("-%c%s", optionsTable[o].shortName, p);
+                  if (p)
+                  {
+                     printf ("-%c%s", optionsTable[o].short_name, p);
+                     free (p);
+                  }
                }
                break;
             }
@@ -445,55 +671,51 @@ main (int argc, const char *argv[])
    {                            // Document args
       time_t now = time (0);
       struct tm t;
-      gmtime_r (&now, &t);
+      if (!gmtime_utc (&now, &t))
+         memset (&t, 0, sizeof (t));
       printf ("// Created %04d-%02d-%02dT%02d:%02d:%02dZ %s\n", t.tm_year + 1900, t.tm_mon + 1, t.tm_mday, t.tm_hour, t.tm_min,
               t.tm_sec, getenv ("REMOTE_ADDR") ? : "");
       int o;
-      for (o = 0; optionsTable[o].longName; o++)
-         if (optionsTable[o].shortName && optionsTable[o].arg)
-            switch (optionsTable[o].argInfo & POPT_ARG_MASK)
+      for (o = 0; optionsTable[o].long_name; o++)
+         if (optionsTable[o].short_name && optionsTable[o].target)
+            switch (optionsTable[o].type)
             {
-            case POPT_ARG_NONE:
-               if (*(int *) optionsTable[o].arg)
-                  printf ("// %s: %c\n", optionsTable[o].descrip, optionsTable[o].shortName);
+            case OPT_NONE:
+               if (*(int *) optionsTable[o].target)
+                  printf ("// %s: %c\n", optionsTable[o].descrip, optionsTable[o].short_name);
                break;
-            case POPT_ARG_INT:
+            case OPT_INT:
                {
-                  int v = *(int *) optionsTable[o].arg;
+                  int v = *(int *) optionsTable[o].target;
                   if (v)
-                     printf ("// %s: %c=%d\n", optionsTable[o].descrip, optionsTable[o].shortName, v);
+                     printf ("// %s: %c=%d\n", optionsTable[o].descrip, optionsTable[o].short_name, v);
                }
                break;
-            case POPT_ARG_DOUBLE:
+            case OPT_DOUBLE:
                {
-                  double v = *(double *) optionsTable[o].arg;
+                  double v = *(double *) optionsTable[o].target;
                   if (v)
                   {
-                     char temp[50],
-                      *p;
+                     char temp[50], *p;
                      sprintf (temp, "%f", v);
                      for (p = temp + strlen (temp); p > temp && p[-1] == '0'; p--);
                      if (p > temp && p[-1] == '.')
                         p--;
                      *p = 0;
-                     printf ("// %s: %c=%s\n", optionsTable[o].descrip, optionsTable[o].shortName, temp);
+                     printf ("// %s: %c=%s\n", optionsTable[o].descrip, optionsTable[o].short_name, temp);
                   }
                }
                break;
-            case POPT_ARG_STRING:
+            case OPT_STRING:
                {
-                  char *v = *(char * *) optionsTable[o].arg;
+                  char *v = *(char * *) optionsTable[o].target;
                   if (v && *v)
-                     printf ("// %s: %c=%s\n", optionsTable[o].descrip, optionsTable[o].shortName, v);
+                     printf ("// %s: %c=%s\n", optionsTable[o].descrip, optionsTable[o].short_name, v);
                }
                break;
             }
    }
-   if (error)
-   {                            // Problem
-      printf ("// ** %s **\n", error);
-      return 1;
-   }
+
 
    // Other adjustments
    basethickness += logodepth;
@@ -501,7 +723,7 @@ main (int argc, const char *argv[])
    {                            // Modules
       if (textslow)
          printf
-            ("module cuttext(){translate([0,0,-%d])minkowski(){rotate([0,0,22.5])cylinder(h=%lld,d1=%lld,d2=0,$fn=8);linear_extrude(height=%d,convexity=10)mirror([1,0,0])children();}}\n",
+            ("module cuttext(){translate([0,0,-%lld])minkowski(){rotate([0,0,22.5])cylinder(h=%lld,d1=%lld,d2=0,$fn=8);linear_extrude(height=%lld,convexity=10)mirror([1,0,0])children();}}\n",
              SCALE, scaled (textdepth), scaled (textdepth), SCALE);
       else
          printf ("module cuttext(){linear_extrude(height=%lld,convexity=10,center=true)mirror([1,0,0])children();}\n",
@@ -535,7 +757,7 @@ main (int argc, const char *argv[])
       y = 0;
    int sq = sqrt (parts) + 0.5,
       n = sq * sq - parts;
-   int box (int part)
+   void box (int part)
    {                            // Make the box - part 1 in inside
       int N,
         X,
@@ -618,12 +840,10 @@ main (int argc, const char *argv[])
          double y0 = base + mazestep / 2 - mazestep * (helix + 1) + mazestep / 8;
          H += 2 + helix;        // Allow one above, one below and helix below
          if (W < 3 || H < 1)
-            errx (1, "Too small");
-         double a = 0,
-            dy = 0;
+            fatal ("Too small");
+         double dy = 0;
          if (helix)
          {
-            a = atan (mazestep * helix / r / 2 / M_PI) * 180 / M_PI;
             dy = mazestep * helix / W;
          }
          unsigned char maze[W][H];
@@ -770,9 +990,7 @@ main (int argc, const char *argv[])
                      continue;
                   }
                   // Pick one of the ways randomly
-                  if (read (f, &v, sizeof (v)) != sizeof (v))
-                     err (1, "Read /dev/random");
-                  v %= n;
+                  v = random_int (n);
                   // Move forward
                   if (!test (X + 1, Y) && (v -= BIASR) < 0)
                   {             // Right
@@ -805,7 +1023,7 @@ main (int argc, const char *argv[])
                      Y++;
                      maze[X][Y] |= FLAGD;
                   } else
-                     errx (1, "WTF");   // We should have picked a way we can go
+                     fatal ("Unexpected maze path");   // We should have picked a way we can go
                   // Entry
                   if (p->n > max && (test (X, Y + 1) & FLAGI)   //
                       && (!flip || inside || !(X % (W / nubs))))
@@ -820,9 +1038,7 @@ main (int argc, const char *argv[])
                   next->n = p->n + 1;
                   next->next = NULL;
                   // How to add points to queue... start or end
-                  if (read (f, &v, sizeof (v)) != sizeof (v))
-                     err (1, "Read /dev/random");
-                  v %= 10;
+                  v = random_int (10);
                   if (v < (mazecomplexity < 0 ? -mazecomplexity : mazecomplexity))
                   {             // add next point at start - makes for longer path
                      if (!pos)
@@ -916,14 +1132,14 @@ main (int argc, const char *argv[])
             {
                printf ("[%lld,%lld,%lld],", scaled (x), scaled (y), scaled (z));
                if (s[S].n >= MAXY)
-                  errx (1, "WTF points %d", S);
+                  fatal ("WTF points %d", S);
                s[S].p[s[S].n++] = P++;
             }
             void addpointr (int S, double x, double y, double z)
             {
                printf ("[%lld,%lld,%lld],", scaled (x), scaled (y), scaled (z));
                if (s[S].n >= MAXY)
-                  errx (1, "WTF points %d", S);
+                  fatal ("WTF points %d", S);
                s[S].p[s[S].n++] = -(P++);
             }
             int bottom = P;
@@ -965,7 +1181,7 @@ main (int argc, const char *argv[])
             for (S = 0; S < W * 4; S++)
             {                   // Wrap back to start
                if (s[S].n >= MAXY)
-                  errx (1, "WTF points");
+                  fatal ("WTF points");
                s[S].p[s[S].n++] = S;
             }
             printf ("]");
@@ -987,8 +1203,7 @@ main (int argc, const char *argv[])
                   return 0;
                }
                if (S >= W * 4)
-                  errx (1, "Bad render %d", S);
-               char start = 0;
+                  fatal ("Bad render %d", S);
                if (!s[S].l)
                {                // New - draw to bottom
                   s[S].l = (l < 0 ? -1 : 1) * (bottom + S + W * 4 + (l < 0 ? 0 : W * 4));
@@ -1006,7 +1221,7 @@ main (int argc, const char *argv[])
                for (n1 = 0; n1 < s[S].n && abs (s[S].p[n1]) != abs (s[S].l); n1++);
                for (n2 = n1; n2 < s[S].n && abs (s[S].p[n2]) != abs (l); n2++);
                if (n1 == s[S].n || n2 == s[S].n)
-                  errx (1, "Bad render %d->%d", s[S].l, l);
+                  fatal ("Bad render %d->%d", s[S].l, l);
                while (n1 < n2)
                {
                   if (sgn (s[S].p[n1]) == sgn (s[S].l))
@@ -1022,7 +1237,7 @@ main (int argc, const char *argv[])
                for (n1 = 0; n1 < s[SR].n && abs (s[SR].p[n1]) != abs (s[S].r); n1++);
                for (n2 = n1; n2 < s[SR].n && abs (s[SR].p[n2]) != abs (r); n2++);
                if (n1 == s[SR].n || n2 == s[SR].n)
-                  errx (1, "Bad render %d->%d", r, s[S].r);
+                  fatal ("Bad render %d->%d", r, s[S].r);
                if (!p || n1 < n2)
                {
                   n2--;
@@ -1248,7 +1463,8 @@ main (int argc, const char *argv[])
       if (textend)
       {
          int n = 0;
-         char *p = strdupa (textend);
+         char *p = strdup (textend);
+         char *orig = p;
          while (p)
          {
             char *q = strchr (p, '\\');
@@ -1262,12 +1478,14 @@ main (int argc, const char *argv[])
             p = q;
             n++;
          }
+         free (orig);
       }
       void textside (int outset)
       {
          double a = 90 + (double) 180 / outersides;
          double h = r3 * sin (M_PI / outersides) * textsidescale;
-         char *p = strdupa (textsides);
+         char *p = strdup (textsides);
+         char *orig = p;
          while (p)
          {
             char *q = strchr (p, '\\');
@@ -1282,6 +1500,7 @@ main (int argc, const char *argv[])
             a -= 360 / outersides;
             p = q;
          }
+         free (orig);
       }
       if (textsides && part == parts && outersides && !textoutset)
          textside (0);
@@ -1304,9 +1523,8 @@ main (int argc, const char *argv[])
       else if (part < parts && !basewide)
       {                         // We can position randomly
          int v;
-         if (read (f, &v, sizeof (v)) != sizeof (v))
-            err (1, "Read /dev/random");
-         entrya = v % 360;
+         v = random_int (360);
+         entrya = v;
       }
       // Nubs
       void addnub (double r, int inside)
@@ -1375,6 +1593,5 @@ main (int argc, const char *argv[])
       for (part = 1; part <= parts; part++)
          box (part);
    printf ("}\n");
-   close (f);
    return 0;
 }

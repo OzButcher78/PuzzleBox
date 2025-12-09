@@ -1,6 +1,15 @@
-puzzlebox: puzzlebox.c
-ifeq ($(shell uname),Darwin)
-	/usr/local/opt/gcc/bin/gcc-8 -L/usr/local/lib -I/usr/local/include -O -o $@ $< -lpopt -lm -g -D_GNU_SOURCE
-else
-	cc -O -o $@ $< -lpopt -lm -g -D_GNU_SOURCE
-endif
+CC ?= cc
+CFLAGS ?= -O2 -Wall -Wextra -std=gnu99
+LDFLAGS ?=
+LDLIBS ?= -lm
+TARGET ?= puzzlebox
+
+all: $(TARGET)
+
+$(TARGET): puzzlebox.c
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $< $(LDLIBS)
+
+clean:
+	rm -f $(TARGET)
+
+.PHONY: all clean
