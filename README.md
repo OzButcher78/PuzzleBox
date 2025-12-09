@@ -1,15 +1,37 @@
 # Puzzle Box
-Makes OpenSCAD file for a puzzle box
+Makes OpenSCAD code for a cylindrical puzzle box.
 
-Has been tested on linux, you probably need libpopt-dev
+## Building
+### Windows (MSYS2 MinGW64)
+1. Install [MSYS2](https://www.msys2.org/) and open the **MSYS2 MinGW64** shell.
+2. Install the toolchain: `pacman -S --needed mingw-w64-x86_64-gcc make`.
+3. Build the binary: `make CC=gcc`.
 
-As you will see from the Makefile, you will need popt development library.
-You also need gcc supporting _GNU_SOURCE for strdupa() and asprintf()
+### Linux or macOS
+Simply run `make`. You can override the compiler with `make CC=gcc` if you prefer.
 
-And, for the avoidance of doubt, obviously, this is normally built using "make"
+The build produces a single executable named `puzzlebox` (or `puzzlebox.exe` on Windows).
 
-When built, use --help for options, or see https://www.me.uk/puzzlebox
+## Usage
+The program writes the OpenSCAD model to standard output. Redirect it to a file and open the
+resulting `.scad` in OpenSCAD to export an STL.
 
-On macOS, this requires gcc, so "brew install gcc", then should make with no problem.
+```
+./puzzlebox > box.scad
+```
+
+Use `--help` to see all supported parameters and their defaults:
+
+```
+./puzzlebox --help
+```
+
+### Example commands
+* Default box: `./puzzlebox > box.scad`
+* Taller maze with more twists: `./puzzlebox --core-height 80 --maze-complexity 7 > tall_box.scad`
+* Round outer wall with tighter spacing: `./puzzlebox --outer-sides 0 --maze-step 2.5 --core-diameter 14 > round_box.scad`
+
+The executable returns `0` on success and only writes OpenSCAD code to stdout. Any errors or
+debug information are printed to stderr.
 
 (c) Copyright 2019 Adrian Kennard. See LICENSE file (GPL)
